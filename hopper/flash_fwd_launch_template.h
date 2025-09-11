@@ -156,6 +156,8 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         params.tile_count_semaphore, params.cu_seqlens_q, params.seqused_q,
         // params.num_m_blocks_ptr,
         params.num_splits_dynamic_ptr,
+        params.cp_world_size,
+        params.cp_rank,
     };
 
     if (Varlen && params.num_splits_dynamic_ptr && !params.skip_scheduler_metadata_computation) {

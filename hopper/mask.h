@@ -138,27 +138,33 @@ struct Mask {
                     #pragma unroll
                     for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
                         int const col0 = int(get<Col>(t0ScS_rowcol(_0{}, n)));
-                        int row_limit_top;
-                        if (cp_world_size > 1) {
-                            // For DCP: compute absolute K position and compare with Q positions
-                            int local_k_idx = col0 + n_block * kBlockN;
-                            int abs_k_idx = local_k_idx * cp_world_size + cp_rank;
-                            // For SwapAB case, we need to mask rows based on DCP logic
-                            row_limit_top = kBlockM; // Will be set properly below
-                            #pragma unroll
-                            for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-                                int const row_idx = int(get<Row>(t0ScS_rowcol(m, _0{}))) + m_block * kBlockM;
-                                int abs_q_idx = row_idx + seqlen_k - seqlen_q;
-                                if (abs_k_idx > abs_q_idx) { tSrS_rowcol(m, n) = -INFINITY; }
-                            }
-                        } else {
-                            // Original non-DCP logic
-                            // If col0 is beyond the column limit, we want to mask out the entire column, by setting
-                            // row limit to be kBlockM.
-                            row_limit_top = col0 >= seqlenk_col_limit ? kBlockM : col0 - causal_row_offset;
-                            #pragma unroll
-                            for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-                                if (int(get<Row>(t0ScS_rowcol(m, _0{}))) < row_limit_top) { tSrS_rowcol(m, n) = -INFINITY; }
+                        // If col0 is beyond the column limit, we want to mask out the entire column, by setting
+                        // row limit to be kBlockM.
+                        int const row_limit_top = col0 >= seqlenk_col_limit ? kBlockM : col0 - causal_row_offset;
+                        #pragma unroll
+                        for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+                            int row_limit_top;
+                            if (cp_world_size > 1) {
+                                // For DCP: compute absolute K position and compare with Q positions
+                                int local_k_idx = col0 + n_block * kBlockN;
+                                int abs_k_idx = local_k_idx * cp_world_size + cp_rank;
+                                // For SwapAB case, we need to mask rows based on DCP logic
+                                row_limit_top = kBlockM; // Will be set properly below
+                                #pragma unroll
+                                for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+                                    int const row_idx = int(get<Row>(t0ScS_rowcol(m, _0{}))) + m_block * kBlockM;
+                                    int abs_q_idx = row_idx + seqlen_k - seqlen_q;
+                                    if (abs_k_idx > abs_q_idx) { tSrS_rowcol(m, n) = -INFINITY; }
+                                }
+                            } else {
+                                // Original non-DCP logic
+                                // If col0 is beyond the column limit, we want to mask out the entire column, by setting
+                                // row limit to be kBlockM.
+                                row_limit_top = col0 >= seqlenk_col_limit ? kBlockM : col0 - causal_row_offset;
+                                #pragma unroll
+                                for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+                                    if (int(get<Row>(t0ScS_rowcol(m, _0{}))) < row_limit_top) { tSrS_rowcol(m, n) = -INFINITY; }
+                                }
                             }
                         }
                     }
