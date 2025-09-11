@@ -27,15 +27,15 @@ find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 # Set build environment variables
 export FLASH_ATTENTION_FORCE_BUILD=TRUE
 export FLASH_ATTENTION_FORCE_CXX11_ABI=TRUE
-#export MAX_JOBS=4  # Adjust based on your system
+export MAX_JOBS=4  # Adjust based on your system
 
 # Uninstall existing flash-attn if present
 echo "🗑️ Uninstalling existing flash-attn..."
-pip uninstall flash-attn -y || true
+uv pip uninstall flash-attn || true
 
 # Build and install
 echo "🔨 Building and installing Flash Attention..."
-pip install -e . --no-build-isolation
+uv pip install -e . --no-build-isolation
 
 # Verify installation
 echo "✅ Verifying installation..."

@@ -472,6 +472,8 @@ struct CollectiveMainloopFwdSm90 {
         int const* const leftpad_k = nullptr;
         int const* const seqlens_rotary = nullptr;
         ElementSAux const* const ptr_S_aux = nullptr;
+        int cp_world_size = 1;
+        int cp_rank = 0;
     };
 
     static Params
