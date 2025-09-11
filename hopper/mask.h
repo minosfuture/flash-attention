@@ -104,10 +104,24 @@ struct Mask {
                                 int abs_k_idx = local_k_idx * cp_world_size + cp_rank;
                                 // Compare absolute K position with absolute Q position
                                 int abs_q_idx = row_idx + seqlen_k - seqlen_q;
-                                if (abs_k_idx > abs_q_idx) { tSrS_rowcol(m, n) = -INFINITY; }
+                                if (abs_k_idx > abs_q_idx) {
+                                    tSrS_rowcol(m, n) = -INFINITY;
+                                    printf("DCP mask: m=%d, n=%d, local_k=%d, abs_k=%d, abs_q=%d, mask=TRUE\n",
+                                           m, n, local_k_idx, abs_k_idx, abs_q_idx);
+                                } else {
+                                    printf("DCP mask: m=%d, n=%d, local_k=%d, abs_k=%d, abs_q=%d, mask=FALSE\n",
+                                           m, n, local_k_idx, abs_k_idx, abs_q_idx);
+                                }
                             } else {
                                 // Original non-DCP logic
-                                if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= col_limit_right) { tSrS_rowcol(m, n) = -INFINITY; }
+                                if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= col_limit_right) {
+                                    tSrS_rowcol(m, n) = -INFINITY;
+                                    printf("Non-DCP mask: m=%d, n=%d, col=%d, limit=%d, mask=TRUE\n",
+                                           m, n, int(get<Col>(t0ScS_rowcol(_0{}, n))), col_limit_right);
+                                } else {
+                                    printf("Non-DCP mask: m=%d, n=%d, col=%d, limit=%d, mask=FALSE\n",
+                                           m, n, int(get<Col>(t0ScS_rowcol(_0{}, n))), col_limit_right);
+                                }
                             }
                         }
                     }
@@ -150,20 +164,39 @@ struct Mask {
                                 int abs_k_idx = local_k_idx * cp_world_size + cp_rank;
                                 // For SwapAB case, we need to mask rows based on DCP logic
                                 row_limit_top = kBlockM; // Will be set properly below
+                                printf("DCP SwapAB: col0=%d, n_block=%d, local_k=%d, abs_k=%d\n",
+                                       col0, n_block, local_k_idx, abs_k_idx);
                                 #pragma unroll
                                 for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
                                     int const row_idx = int(get<Row>(t0ScS_rowcol(m, _0{}))) + m_block * kBlockM;
                                     int abs_q_idx = row_idx + seqlen_k - seqlen_q;
-                                    if (abs_k_idx > abs_q_idx) { tSrS_rowcol(m, n) = -INFINITY; }
+                                    if (abs_k_idx > abs_q_idx) {
+                                        tSrS_rowcol(m, n) = -INFINITY;
+                                        printf("DCP SwapAB mask: m=%d, n=%d, row_idx=%d, abs_k=%d, abs_q=%d, mask=TRUE\n",
+                                               m, n, row_idx, abs_k_idx, abs_q_idx);
+                                    } else {
+                                        printf("DCP SwapAB mask: m=%d, n=%d, row_idx=%d, abs_k=%d, abs_q=%d, mask=FALSE\n",
+                                               m, n, row_idx, abs_k_idx, abs_q_idx);
+                                    }
                                 }
                             } else {
                                 // Original non-DCP logic
                                 // If col0 is beyond the column limit, we want to mask out the entire column, by setting
                                 // row limit to be kBlockM.
                                 row_limit_top = col0 >= seqlenk_col_limit ? kBlockM : col0 - causal_row_offset;
+                                printf("Non-DCP SwapAB: col0=%d, seqlenk_col_limit=%d, causal_row_offset=%d, row_limit_top=%d\n",
+                                       col0, seqlenk_col_limit, causal_row_offset, row_limit_top);
                                 #pragma unroll
                                 for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-                                    if (int(get<Row>(t0ScS_rowcol(m, _0{}))) < row_limit_top) { tSrS_rowcol(m, n) = -INFINITY; }
+                                    int row_idx = int(get<Row>(t0ScS_rowcol(m, _0{})));
+                                    if (row_idx < row_limit_top) {
+                                        tSrS_rowcol(m, n) = -INFINITY;
+                                        printf("Non-DCP SwapAB mask: m=%d, n=%d, row_idx=%d, row_limit_top=%d, mask=TRUE\n",
+                                               m, n, row_idx, row_limit_top);
+                                    } else {
+                                        printf("Non-DCP SwapAB mask: m=%d, n=%d, row_idx=%d, row_limit_top=%d, mask=FALSE\n",
+                                               m, n, row_idx, row_limit_top);
+                                    }
                                 }
                             }
                         }

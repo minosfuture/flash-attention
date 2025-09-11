@@ -1151,6 +1151,7 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     }
 
     // Set DCP parameters
+    printf("in flash_api.cpp:mha_fwd: cp_world_size=%d, cp_rank=%d\n", cp_world_size, cp_rank);
     params.cp_world_size = cp_world_size;
     params.cp_rank = cp_rank;
 
