@@ -1208,6 +1208,8 @@ struct CollectiveMainloopFwdSm90 {
         }
 
         if constexpr (IntraWGOverlap) {
+            printf("1211 %d: start IntraWGOverlap\n", thread_idx);
+
             Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
             consumer_wait(pipeline_k, smem_pipe_read);
             flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);
@@ -1240,6 +1242,7 @@ struct CollectiveMainloopFwdSm90 {
 
             // Each step does gemm0 for iter n_block, gemm1 for iter n_block + 1, and softmax for iter n_block.
             auto fwd_step = [&](int const n_block, auto mask_fn, auto check_inf_type) {
+              printf("1245 %d: start fwd_step\n", thread_idx);
                 static constexpr bool Check_inf = decltype(check_inf_type)::value;
                 PipelineState smem_pipe_read_v(smem_pipe_read.index(), smem_pipe_read.phase(), smem_pipe_read.count());
                 ++smem_pipe_read;
@@ -1263,10 +1266,12 @@ struct CollectiveMainloopFwdSm90 {
                 }
                 scoremod_premask_fn(tSrS);
                 mask_fn(tSrS, n_block);
-                printf("tSrS tensor after masking - n_block=%d:\n", n_block);
-                cute::print(tSrS);
-                printf("\n");
-
+                if (thread0()) {
+                    printf("#1267 tSrS tensor after masking - n_block=%d:\n", n_block);
+                    cute::print(tSrS);
+                    printf("\n");
+                }
+                      
                 cute::copy(softmax.template max_get_scale</*Is_first=*/false, Check_inf>(tSrS), scores_scale);
                 if constexpr (LargeHeadDimV) { store_scales(scores_scale, smem_pipe_read_v.index()); }
                 softmax.template online_softmax</*Is_first=*/false, Check_inf>(tSrS);
@@ -1335,8 +1340,10 @@ struct CollectiveMainloopFwdSm90 {
         } else {  // No intra-WG overlap
 
             warp_scheduler_barrier_sync();
+            printf("1340 %d: start fwd_step\n", thread_idx);
 
             auto fwd_step = [&](int const n_block, auto mask_fn, auto is_first_iter_type, auto check_inf_type) {
+                printf("%d: start fwd_step\n", thread_idx);
                 static constexpr bool Is_first_iter = decltype(is_first_iter_type)::value;
                 static constexpr bool Check_inf = decltype(check_inf_type)::value;
                 auto smem_pipe_read_prev = smem_pipe_read;
@@ -1361,6 +1368,12 @@ struct CollectiveMainloopFwdSm90 {
                 }
                 scoremod_premask_fn(tSrS);
                 mask_fn(tSrS, n_block);
+                if (thread0()) {
+                    printf("tSrS tensor after masking - n_block=%d:\n", n_block);
+                    cute::print(tSrS);
+                    printf("\n");
+                }
+
                 Tensor scores_scale = softmax.template max_get_scale</*Is_first=*/Is_first_iter, Check_inf>(tSrS);
                 if constexpr (LargeHeadDimV && !Is_first_iter) { store_scales(scores_scale, smem_pipe_read_prev.index()); }
                 softmax.template online_softmax</*Is_first=*/Is_first_iter, Check_inf>(tSrS);

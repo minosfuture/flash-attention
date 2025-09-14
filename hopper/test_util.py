@@ -322,7 +322,9 @@ def attention_ref(
     upcast=True,
     reorder_ops=False,
     intermediate_dtype=None,
-    s_aux=None
+    s_aux=None,
+    cp_world_size=1,
+    cp_rank=0,
 ):
     """
     Arguments:
@@ -342,6 +344,8 @@ def attention_ref(
             without changing the math. This is to estimate the numerical error from operation
             reordering.
         s_aux: (nheads)
+        cp_world_size: Number of context parallel ranks
+        cp_rank: Current rank ID (0 to cp_world_size-1)
     Output:
         output: (batch_size, seqlen_q, nheads, head_dim_v)
         attention: (batch_size, nheads, seqlen_q, seqlen_k), softmax after dropout
@@ -389,6 +393,8 @@ def attention_ref(
             key_padding_mask,
             key_leftpad=key_leftpad,
             device=q.device,
+            cp_world_size=cp_world_size,
+            cp_rank=cp_rank,
         )
         scores.masked_fill_(local_mask, float("-inf"))
     if attn_bias is not None:
