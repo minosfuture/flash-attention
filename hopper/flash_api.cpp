@@ -705,6 +705,7 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         int const cp_world_size,  // DCP world size
         int const cp_rank         // DCP rank
         ) {
+  printf("%s:%s\n", __FILE__, __FUNCTION__);
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
     bool is_sm8x = dprops->major >= 8;

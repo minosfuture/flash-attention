@@ -300,6 +300,7 @@ def construct_cp_mask(
                 ),
             )
 
+    print(f"cp {mask=}")
     return mask
 
 

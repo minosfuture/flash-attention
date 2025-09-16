@@ -1005,6 +1005,7 @@ struct CollectiveMainloopFwdSm90 {
         static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
         // can't use auto [m_block, ...] = block_coord since structured binding cannot be captured in lambda
+        // block index
         int const m_block = get<0>(block_coord);
         int const bidh = get<1>(block_coord);
         int const bidb = get<2>(block_coord);
@@ -1013,6 +1014,7 @@ struct CollectiveMainloopFwdSm90 {
         auto [n_block_min, n_block_max, n_offset] = BlockMN_t::get_n_block_min_max(
             seqlen_info, m_block, bidb, split_idx, params.num_splits,
             params.window_size_left, params.window_size_right, params.qhead_per_khead_divmod);
+        printf("%3d: n_block_min=%d, n_block_max=%d, n_offset=%d\n", thread_idx, n_block_min, n_block_max, n_offset);
         // It's possible to have n_block_max <= n_block_min. We don't want to load Q or change any barrier
         if constexpr (Is_causal || Is_local || Varlen || Split) {
             if (n_block_max <= n_block_min) { return false; }
@@ -1097,6 +1099,7 @@ struct CollectiveMainloopFwdSm90 {
 
         // NOTE: sink_token_length is dead code
         // But we subtract n_offset for consistency in mask calculations
+        printf("%3d: create mask with cp_world_size=%d, cp_rank=%d, seqlen_k=%d\n", thread_idx, params.cp_world_size, params.cp_rank, seqlen_k);
         flash::Mask<kBlockM, kBlockN, PackGQA, TiledMmaQK> mask(
             thread_idx, seqlen_q, seqlen_k, params.window_size_left, params.window_size_right, 0 - n_offset /*sink_token_length*/,
             params.qhead_per_khead_divmod,
@@ -1242,18 +1245,20 @@ struct CollectiveMainloopFwdSm90 {
 
             // Each step does gemm0 for iter n_block, gemm1 for iter n_block + 1, and softmax for iter n_block.
             auto fwd_step = [&](int const n_block, auto mask_fn, auto check_inf_type) {
-              printf("1245 %d: start fwd_step\n", thread_idx);
+              printf("1245 %d: start fwd_step, m_block=%d, n_block=%d\n", thread_idx, m_block, n_block);
                 static constexpr bool Check_inf = decltype(check_inf_type)::value;
                 PipelineState smem_pipe_read_v(smem_pipe_read.index(), smem_pipe_read.phase(), smem_pipe_read.count());
                 ++smem_pipe_read;
                 Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
                 if (!UseSchedulerBarrier || warp_group_idx == 0) { consumer_wait(pipeline_k, smem_pipe_read); }
                 warp_scheduler_barrier_sync();
+                printf("%3d: first gemm\n", thread_idx);
                 flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);
                 if constexpr (RescaleOBeforeGemm) { softmax.rescale_o(tOrO, scores_scale); }
                 if constexpr(!HasQv) {
                     if (!UseSchedulerBarrier || warp_group_idx == 0) { consumer_wait(pipeline_v, smem_pipe_read_v); }
                 }
+                printf("%3d: second gemm\n", thread_idx);
                 flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, cute::conditional_return<MmaPV_is_RS>(tOrP, tOsP), tOrV(_, _, _, smem_pipe_read_v.index()), tOrO);
                 warp_scheduler_barrier_arrive();
                 warpgroup_wait<1>();
@@ -1265,6 +1270,7 @@ struct CollectiveMainloopFwdSm90 {
                     flash::gemm</*zero_init=*/false, /*wg_wait=*/0>(tiled_mma_qv, tSrQv, tSrV(_, _, _, smem_pipe_read.index()), tSrS);
                 }
                 scoremod_premask_fn(tSrS);
+                printf("%3d: mask_fn\n", thread_idx);
                 mask_fn(tSrS, n_block);
                 if (thread0()) {
                     printf("#1267 tSrS tensor after masking - n_block=%d:\n", n_block);
@@ -1288,11 +1294,18 @@ struct CollectiveMainloopFwdSm90 {
             };
 
             if constexpr (Is_causal || Is_local) { // Separate iterations with causal or local masking
-                auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
+                auto mask_fn = [&](auto& tSrS, int n_block) {
+                  printf("%3d: in mask_fn 1294, m_block=%d, n_block=%d\n", m_block, n_block);
+                  mask.template apply<false /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
                 int const m_idx_min = !PackGQA ? m_block * kBlockM : params.qhead_per_khead_divmod.divide(m_block * kBlockM);
                 // If local, blocking (window_size_right + window_size_left)
                 int const n_block_min_causal_local_mask =
                     std::max(n_block_min, (m_idx_min + seqlen_k - seqlen_q + params.window_size_right) / kBlockN);
+                printf("%3d: n_block_min_causal_local_mask=%d, cur n_block=%d, n_block_min=%d, m_idx_min=%d, seqlen_k=%d, "
+                       "seqlen_q=%d, window_right=%d, kBlockN=%d, dcp=%d, non-dcp=%d\n", thread_idx, n_block_min_causal_local_mask, n_block, 
+                       n_block_min, m_idx_min, seqlen_k, seqlen_q, params.window_size_right, kBlockN,
+                       (m_idx_min + params.cp_world_size * seqlen_k - seqlen_q + params.window_size_right) / kBlockN,
+                       (m_idx_min + seqlen_k - seqlen_q + params.window_size_right) / kBlockN);
                 #pragma unroll 1
                 for (; n_block >= n_block_min_causal_local_mask; --n_block) {
                     fwd_step(n_block, mask_fn, cute::true_type{} /*check_inf*/);
@@ -1304,9 +1317,10 @@ struct CollectiveMainloopFwdSm90 {
             int const n_block_min_before_local_mask = !Is_local
                 ? n_block_min
                 : std::max(n_block_min,
-                           cute::ceil_div(m_idx_max + seqlen_k - seqlen_q - params.window_size_left, kBlockN));
+                           cute::ceil_div(m_idx_max + params.cp_world_size * seqlen_k - seqlen_q - params.window_size_left, kBlockN));
             auto no_mask_fn = [](auto& tSrS, int n_block) { };
             #pragma unroll 1
+            printf("%3d: n_block_min_before_local_mask=%d, cur n_block=%d\n", thread_idx, n_block_min_before_local_mask, n_block);
             for (; n_block >= n_block_min_before_local_mask; --n_block) {
                 fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);
             }
@@ -1398,7 +1412,7 @@ struct CollectiveMainloopFwdSm90 {
                 pipeline_v.consumer_release(smem_pipe_read);  // release V
             };
 
-            auto first_iter_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
+            auto first_iter_mask_fn = [&](auto& tSrS, int n_block) { printf("%3d: in first_iter_mask_fn\n", thread_idx); mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
             fwd_step(n_block, first_iter_mask_fn, cute::true_type{} /*is_first_iter*/, cute::true_type{} /*check_inf*/);
             --n_block;
             if constexpr (Is_causal || Is_local) { // Separate iterations with causal or local masking

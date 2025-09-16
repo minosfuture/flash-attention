@@ -347,7 +347,8 @@ public:
                     get<0>(params.mainloop.shape_K_new),
                     params.mainloop.cu_seqlens_q, params.mainloop.cu_seqlens_k, params.mainloop.cu_seqlens_k_new,
                     params.mainloop.seqused_q, params.mainloop.seqused_k, params.mainloop.leftpad_k,
-                    params.mainloop.seqlens_rotary
+                    params.mainloop.seqlens_rotary,
+                    params.mainloop.cp_world_size
                 };
                 if constexpr (AppendKV) {
                     bool tile_new_valid = mainloop.load_kv_new(
@@ -388,6 +389,9 @@ public:
                  // get_next_work will be called before the epilogue
                  ) {
                 auto block_coord = work_tile_info.get_block_coord(params.scheduler);
+                printf("%3d: block_coord: block=%d, bidh_actual=%d, bidb=%d, split_idx=%d\n",
+                   threadIdx.x - MmaThreadOffset,
+                   get<0>(block_coord), get<1>(block_coord), get<2>(block_coord), get<3>(block_coord));
                 int const bidb = get<2>(block_coord);
                 SeqlenInfo_t seqlen_info{
                     bidb,
@@ -396,7 +400,7 @@ public:
                     get<0>(params.mainloop.shape_K_new),
                     params.mainloop.cu_seqlens_q, params.mainloop.cu_seqlens_k, params.mainloop.cu_seqlens_k_new,
                     params.mainloop.seqused_q, params.mainloop.seqused_k, params.mainloop.leftpad_k,
-                    params.mainloop.seqlens_rotary
+                    params.mainloop.seqlens_rotary, params.mainloop.cp_world_size
                 };
                 if constexpr (AppendKV) {
                     bool tile_new_valid = mainloop.store_kv_new(
@@ -450,7 +454,7 @@ public:
                     }
                 }
                 if (tile_valid) {
-                    // if (threadIdx.x == 128) { printf("Before epilogue, bid.x = %d, bid.y = %d, bid.z = %d, m_block = %d, bidb = %d, split_idx = %d\n", blockIdx.x, blockIdx.y, blockIdx.z, m_block, bidb, split_idx); }
+                    //if (threadIdx.x == 128) { printf("Before epilogue, bid.x = %d, bid.y = %d, bid.z = %d, m_block = %d, bidb = %d, split_idx = %d\n", blockIdx.x, blockIdx.y, blockIdx.z, m_block, bidb, split_idx); }
                     epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv,
                                    threadIdx.x - MmaThreadOffset, block_coord);
                 } else {

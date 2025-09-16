@@ -40,12 +40,11 @@ struct Mask {
         , cp_world_size(cp_world_size)
         , cp_rank(cp_rank)
     {
-        printf("%3d: Mask: seqlen_q=%d, seqlen_k=%d, "
+        printf("%3d: Mask Ctor: seqlen_q=%d, seqlen_k=%d, "
                "window_size_left=%d, window_size_right=%d, sink_token_length=%d, "
-               "qhead_per_khead_divmod=%d, cp_world_size=%d, cp_rank=%d, threadIdx(%d,%d)\n", thread_idx,
+               "cp_world_size=%d, cp_rank=%d, PackGQA=%d\n", thread_idx,
                seqlen_q, seqlen_k, window_size_left, window_size_right,
-               sink_token_length, qhead_per_khead_divmod, cp_world_size, cp_rank,
-               threadIdx.x, threadIdx.y);
+               sink_token_length, cp_world_size, cp_rank, PackGQA ? 1 : 0);
     };
 
     template <bool Seqlenk_mask=false, bool Causal_mask=false, bool Local_mask=false,
@@ -59,15 +58,15 @@ struct Mask {
             return;
         }
 
-        printf("%3d: Mask::apply START: thread_idx=%d, m_block=%d, n_block=%d, Seqlenk_mask=%d, Causal_mask=%d, Local_mask=%d\n",
-               thread_idx, m_block, n_block, (int)Seqlenk_mask, (int)Causal_mask, (int)Local_mask);
+        printf("%3d: Mask::apply START: seqlen_k=%d, m_block=%d, n_block=%d, Seqlenk_mask=%d, Causal_mask=%d, Local_mask=%d\n",
+               thread_idx, seqlen_k, m_block, n_block, Seqlenk_mask ? 1:0, Causal_mask? 1:0, Local_mask ? 1:0);
 
         auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
         auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
 
 
         static constexpr int Row = !SwapAB ? 0 : 1, Col = !SwapAB ? 1 : 0;
-        printf("%3d: Mask::apply: SwapAB=%d, Row=%d, Col=%d\n", thread_idx, (int)SwapAB, Row, Col);
+        //printf("%3d: Mask::apply: SwapAB=%d, Row=%d, Col=%d\n", thread_idx, (int)SwapAB, Row, Col);
 
         Tensor cS = cute::make_identity_tensor(Shape<Int<!SwapAB ? kBlockM : kBlockN>, Int<!SwapAB ? kBlockN : kBlockM>>{});
         Tensor tScS = thread_mma.partition_C(cS);
@@ -91,7 +90,8 @@ struct Mask {
         // So we subtract the limit by the first col index of this thread (get<Col>(tScS_rowcol(_0{}, _0{})))
         int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
         int const seqlenk_col_limit = seqlen_k - n_block * kBlockN - thread_col_offset;
-        printf("%3d: Mask::apply: thread_col_offset=%d, seqlenk_col_limit=%d\n", thread_idx, thread_col_offset, seqlenk_col_limit);
+        printf("%3d: Mask::apply: thread_col_offset=%d, seqlenk_col_limit=%d, cp_world_size=%d, cp_rank=%d\n", thread_idx, thread_col_offset, seqlenk_col_limit,
+               cp_world_size, cp_rank);
         if constexpr (!Causal_mask && !Local_mask) {
             if constexpr (Seqlenk_mask) {  // Just masking based on col
                 printf("%d: Mask::apply: Seqlenk masking only\n", thread_idx);
@@ -119,7 +119,6 @@ struct Mask {
                 }
                 int const causal_row_offset = 1 + seqlen_k - n_block * kBlockN - seqlen_q - thread_col_offset;
                 if constexpr (Causal_mask) {
-                    printf("%d: Mask::apply: Starting causal masking loop, causal_row_offset=%d\n", thread_idx, causal_row_offset);
                     #pragma unroll
                     for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
                         int const row_idx = !PackGQA
@@ -133,35 +132,46 @@ struct Mask {
                             int col_idx = int(get<Col>(t0ScS_rowcol(_0{}, n)));
                             int local_k_idx = int(get<Col>(t0ScS_rowcol(_0{}, n))) + get<Col>(tScS_rowcol(_0{}, _0{})) + n_block * kBlockN;
                             int abs_k_idx = local_k_idx * cp_world_size + cp_rank;
-                            int abs_q_idx = row_idx + cp_world_size * seqlen_k - seqlen_q;
+                            int k_limit = row_idx + cp_world_size * seqlen_k - seqlen_q;
                             bool masked = false;
                             if (cp_world_size > 1) {
-                                // For DCP: compute absolute K position from local K index
-                                if (abs_k_idx > abs_q_idx || abs_k_idx > cp_world_size * seqlen_k) {
+                // abs_k_idx > abs_q_idx
+                // local_k_idx * cp_world_size + cp_rank > row_idx + cp_world_size * seqlen_k - seqlen_q
+                // (int(get<Col>(t0ScS_rowcol(_0{}, n))) + get<Col>(tScS_rowcol(_0{}, _0{})) + n_block * kBlockN)  * cp_world_size + cp_rank > get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + cp_world_size * seqlen_k - seqlen_q
+                                if (abs_k_idx > k_limit || (Seqlenk_mask && abs_k_idx > cp_world_size * seqlen_k)) {
                                     tSrS_rowcol(m, n) = -INFINITY;
                                     masked = true;
                                 }
                             } else {
-                                // Original non-DCP logic
-                // seqlen_k - n_block * kBlockN - thread_col_offset
-                                //int col_idx = int(get<Col>(t0ScS_rowcol(_0{}, n)));
+                                // col_idx >= col_limit_right
                                 // col_idx >= row_idx + causal_row_offset
-                // col_idx >= get<Row>(tScS_rowcol) + 1 + seqlen_k - seqlen_q - thread_col_offset
-                // col_idx >= get<Row>(tScS_rowcol(m, _0{})) + 1 + seqlen_k - seqlen_q - get<Col>(tScS_rowcol(_0{}, _0{}))
-                // int(get<Col>(t0ScS_rowcol(_0{}, n))) >= get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + 1 + seqlen_k - n_block * kBlockM - seqlen_q - get<Col>(tScS_rowcol(_0{}, _0{}))
-                // int(get<Col>(t0ScS_rowcol(_0{}, n))) + n_block * kBlockM >= get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + 1 + seqlen_k - seqlen_q - get<Col>(tScS_rowcol(_0{}, _0{}))
-                // int(get<Col>(t0ScS_rowcol(_0{}, n))) + get<Col>(tScS_rowcol(_0{}, _0{})) + n_block * kBlockM >= get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + 1 + seqlen_k - seqlen_q
-                                if (col_idx >= col_limit_right) {
+                // int(get<Col>(t0ScS_rowcol(_0{}, n))) >= get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + 1 + seqlen_k - n_block * kBlockN - seqlen_q - thread_col_offset
+                // int(get<Col>(t0ScS_rowcol(_0{}, n))) >= get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + 1 + seqlen_k - n_block * kBlockN - seqlen_q - get<Col>(tScS_rowcol(_0{}, _0{}))
+                // int(get<Col>(t0ScS_rowcol(_0{}, n))) + n_block * kBlockN >= get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + 1 + seqlen_k - seqlen_q - get<Col>(tScS_rowcol(_0{}, _0{}))
+                // int(get<Col>(t0ScS_rowcol(_0{}, n))) + get<Col>(tScS_rowcol(_0{}, _0{})) + n_block * kBlockN >= get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + 1 + seqlen_k - seqlen_q
+                // int(get<Col>(t0ScS_rowcol(_0{}, n))) + get<Col>(tScS_rowcol(_0{}, _0{})) + n_block * kBlockN > get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + seqlen_k - seqlen_q
+                //
+                                // col_idx >= get<Row>(tScS_rowcol) + 1 + seqlen_k - seqlen_q - thread_col_offset
+                                // col_idx >= get<Row>(tScS_rowcol(m, _0{})) + 1 + seqlen_k - seqlen_q - get<Col>(tScS_rowcol(_0{}, _0{}))
+                                // int(get<Col>(t0ScS_rowcol(_0{}, n))) >= get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + 1 + seqlen_k - n_block * kBlockM - seqlen_q - get<Col>(tScS_rowcol(_0{}, _0{}))
+                                // int(get<Col>(t0ScS_rowcol(_0{}, n))) + n_block * kBlockM >= get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + 1 + seqlen_k - seqlen_q - get<Col>(tScS_rowcol(_0{}, _0{}))
+                                // int(get<Col>(t0ScS_rowcol(_0{}, n))) + get<Col>(tScS_rowcol(_0{}, _0{})) + n_block * kBlockM >= get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + 1 + seqlen_k - seqlen_q
+                                //if (col_idx >= col_limit_right) {
+                                if (local_k_idx > k_limit || local_k_idx > seqlen_k) {
                                     tSrS_rowcol(m, n) = -INFINITY;
                                     masked = true;
                                 }
                             }
-                            printf("%3d: mask:%s "
-                                    "m_block=%d, n_block=%d, m=%d, n=%d, col=%d, limit=%d, tco=%d, abs_k=%d, abs_q=%d, ridx=%d, cro=%d, scl=%d, "
-                                    "local_k=%d, dcp_abs_k=%d, dcp_abs_q=%d\n",
-                                    thread_idx, masked ? "T" : "F",
-                                    m_block, n_block, m, n, col_idx, col_limit_right, thread_col_offset, int(get<Col>(t0ScS_rowcol(_0{}, n))) + get<Col>(tScS_rowcol(_0{}, _0{})) + n_block * kBlockM, get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + 1 + seqlen_k - seqlen_q, row_idx, causal_row_offset, seqlenk_col_limit,
-                                    local_k_idx, abs_k_idx, abs_q_idx);
+              // tco: the column offset of the first thread (0,0)
+              // abs_k =
+                            //printf("%3d: mask:%d "
+                            //       "m_block=%d, n_block=%d, m=%d, n=%d, col=%d, limit=%d, tco=%d, abs_k=%d, abs_q=%d, ridx=%d, cro=%d, scl=%d, "
+                            //       "local_k=%d, dcp_abs_k=%d, k_limit=%d\n",
+                            //       thread_idx, masked ? 0 : 1,
+                            //       m_block, n_block, m, n, col_idx, col_limit_right, thread_col_offset,
+                            //       int(get<Col>(t0ScS_rowcol(_0{}, n))) + get<Col>(tScS_rowcol(_0{}, _0{})) + n_block * kBlockN,
+                            //       get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM + 1 + seqlen_k - seqlen_q, row_idx, causal_row_offset, seqlenk_col_limit,
+                            //       local_k_idx, abs_k_idx, k_limit);
                         }
                     }
                 } else {
