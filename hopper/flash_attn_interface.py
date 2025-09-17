@@ -52,7 +52,6 @@ def _flash_attn_forward(
         s_aux=None,
         cp_world_size=1,
         cp_rank=0):
-    print(f"_flash_attn_forward: {k.shape[1]=}")
     q, k, k_new, v_new = [maybe_contiguous(x) for x in (q, k, k_new, v_new)]
     v = v.contiguous() if v.stride(-1) != 1 and v.stride(-3) != 1 else v
     cu_seqlens_q, cu_seqlens_k, cu_seqlens_k_new = [
@@ -268,7 +267,6 @@ class FlashAttnFunc(torch.autograd.Function):
         cp_world_size=1,
         cp_rank=0,
     ):
-        print(f"FlashAttnFunc::forward: {k.shape[1]}")
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
         # out, q, k, v, out_padded, softmax_lse = _flash_attn_forward(
@@ -559,7 +557,6 @@ def flash_attn_func(
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
     """
-    print("flash_attn_func")
     return FlashAttnFunc.apply(
         q,
         k,

@@ -99,31 +99,31 @@ COMPILED_HDIMS = (
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        #(1, 1),
-        #(8, 4),
-        #(64, 128),
-        #(64,64),
-        #(256,256),
-        #(512,512),
-        #(128, 192),
-        #(256, 256),
-        #(239, 1),
-        #(799, 3),
-        #(113, 203),
-        #(113, 128),
-        #(128, 217),
-        #(113, 211),
-        #(108, 256),
-        #(256, 512),
-        #(384, 256),
-        #(640, 128),
-        #(512, 256),
-        #(1024, 1024),
-        #(1023, 1024),
-        #(1024, 1023),
-        #(4096, 1536),
+        (1, 1),
+        (8, 4),
+        (64, 128),
+        (64,64),
+        (256,256),
+        (512,512),
+        (128, 192),
+        (256, 256),
+        (239, 1),
+        (799, 3),
+        (113, 203),
+        (113, 128),
+        (128, 217),
+        (113, 211),
+        (108, 256),
+        (256, 512),
+        (384, 256),
+        (640, 128),
+        (512, 256),
+        (1024, 1024),
+        (1023, 1024),
+        (1024, 1023),
+        (4096, 1536),
         (4096, 2048), # broken
-        #(4224, 4224),
+        (4224, 4224),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
@@ -157,8 +157,8 @@ def test_flash_attn_output(
     s_aux = torch.randn(nheads, device=device, dtype=torch.bfloat16) * 4 if test_sink else None
     s_aux = torch.ones(nheads, device=device, dtype=torch.bfloat16) * 4 if test_sink else None
     print("s_aux ", s_aux)
-    cp_world_size = 2
-    cp_rank = 0
+    cp_world_size = 4
+    cp_rank = 3
     if test_sink:
         dv_vals = [d]
     for dv in dv_vals:

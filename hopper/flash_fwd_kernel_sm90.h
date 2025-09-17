@@ -389,9 +389,6 @@ public:
                  // get_next_work will be called before the epilogue
                  ) {
                 auto block_coord = work_tile_info.get_block_coord(params.scheduler);
-                printf("%3d: block_coord: block=%d, bidh_actual=%d, bidb=%d, split_idx=%d\n",
-                   threadIdx.x - MmaThreadOffset,
-                   get<0>(block_coord), get<1>(block_coord), get<2>(block_coord), get<3>(block_coord));
                 int const bidb = get<2>(block_coord);
                 SeqlenInfo_t seqlen_info{
                     bidb,

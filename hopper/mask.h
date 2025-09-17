@@ -39,13 +39,7 @@ struct Mask {
         , qhead_per_khead_divmod(qhead_per_khead_divmod)
         , cp_world_size(cp_world_size)
         , cp_rank(cp_rank)
-    {
-        printf("%3d: Mask Ctor: seqlen_q=%d, seqlen_k=%d, "
-               "window_size_left=%d, window_size_right=%d, sink_token_length=%d, "
-               "cp_world_size=%d, cp_rank=%d, PackGQA=%d\n", thread_idx,
-               seqlen_q, seqlen_k, window_size_left, window_size_right,
-               sink_token_length, cp_world_size, cp_rank, PackGQA ? 1 : 0);
-    };
+    { };
 
     template <bool Seqlenk_mask=false, bool Causal_mask=false, bool Local_mask=false,
         typename Engine, typename Layout>
@@ -54,19 +48,14 @@ struct Mask {
         static_assert(!(Causal_mask && Local_mask), "Cannot be both causal and local");
         static_assert(Layout::rank == 3, "Only support 3D Tensor");
         if (!Seqlenk_mask && !Causal_mask && !Local_mask) {
-            printf("%3d: Mask::apply EARLY RETURN: No masks enabled\n", thread_idx);
             return;
         }
-
-        printf("%3d: Mask::apply START: seqlen_k=%d, m_block=%d, n_block=%d, Seqlenk_mask=%d, Causal_mask=%d, Local_mask=%d\n",
-               thread_idx, seqlen_k, m_block, n_block, Seqlenk_mask ? 1:0, Causal_mask? 1:0, Local_mask ? 1:0);
 
         auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
         auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
 
 
         static constexpr int Row = !SwapAB ? 0 : 1, Col = !SwapAB ? 1 : 0;
-        //printf("%3d: Mask::apply: SwapAB=%d, Row=%d, Col=%d\n", thread_idx, (int)SwapAB, Row, Col);
 
         Tensor cS = cute::make_identity_tensor(Shape<Int<!SwapAB ? kBlockM : kBlockN>, Int<!SwapAB ? kBlockN : kBlockM>>{});
         Tensor tScS = thread_mma.partition_C(cS);
@@ -74,32 +63,16 @@ struct Mask {
         Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tScS.layout()));
         Tensor t0ScS = thread0_mma.partition_C(cS);
         Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
-        //if (thread_idx == 1) {
-        //  cute::print(thread_mma);
-        //  cute::print(thread0_mma);
-        //  cute::print(tScS_rowcol);
-        //  cute::print(tSrS_rowcol);
-        //  cute::print(t0ScS_rowcol);
-        //}
-
-        //printf("%d: Mask::apply: tSrS_rowcol size=[%d,%d], tScS_rowcol size=[%d,%d]\n",
-        //       (int)size<0>(tSrS_rowcol), (int)size<1>(tSrS_rowcol),
-        //       (int)size<0>(tScS_rowcol), (int)size<1>(tScS_rowcol));
 
         // We want to use the col indices of thread0 to compare, since that is known at compile time.
         // So we subtract the limit by the first col index of this thread (get<Col>(tScS_rowcol(_0{}, _0{})))
         int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
         int const seqlenk_col_limit = seqlen_k - n_block * kBlockN - thread_col_offset;
-        printf("%3d: Mask::apply: thread_col_offset=%d, seqlenk_col_limit=%d, cp_world_size=%d, cp_rank=%d\n", thread_idx, thread_col_offset, seqlenk_col_limit,
-               cp_world_size, cp_rank);
         if constexpr (!Causal_mask && !Local_mask) {
             if constexpr (Seqlenk_mask) {  // Just masking based on col
-                printf("%d: Mask::apply: Seqlenk masking only\n", thread_idx);
                 #pragma unroll
                 for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
                     int col_idx = int(get<Col>(t0ScS_rowcol(_0{}, n)));
-                    printf("%d: Seqlenk mask: n=%d, col_idx=%d, seqlenk_col_limit=%d, mask=%s\n",
-                           thread_idx, n, col_idx, seqlenk_col_limit, (col_idx >= seqlenk_col_limit) ? "TRUE" : "FALSE");
                     if (col_idx >= seqlenk_col_limit) {
                         #pragma unroll
                         for (int m = 0; m < size<0>(tSrS_rowcol); ++m) { tSrS_rowcol(m, n) = -INFINITY; }
