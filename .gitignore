@@ -29,3 +29,5 @@ var/
 
 # Dev
 venv
+
+*.log

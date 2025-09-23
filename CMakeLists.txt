@@ -4,7 +4,7 @@ project(vllm_flash_attn LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(FA2_ENABLED ON)
+set(FA2_ENABLED OFF)
 set(FA3_ENABLED ON)
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
@@ -22,7 +22,7 @@ set(ignoreMe "${VLLM_PYTHON_PATH}")
 set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12" "3.13")
 
 # Supported NVIDIA architectures.
-set(CUDA_SUPPORTED_ARCHS "8.0;8.6;8.9;9.0")
+set(CUDA_SUPPORTED_ARCHS "9.0")  # 8.0;8.6;8.9;9.0")
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
     list(APPEND CUDA_SUPPORTED_ARCHS "10.0" "10.1" "12.0")
 endif()
@@ -122,6 +122,11 @@ list(APPEND VLLM_FA_GPU_FLAGS --expt-relaxed-constexpr --expt-extended-lambda --
 # driver API. This causes problems when linking with earlier versions of CUDA.
 # Setting this variable sidesteps the issue by calling the driver directly.
 list(APPEND VLLM_FA_GPU_FLAGS -DCUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+
+list(APPEND VLLM_FA_GPU_FLAGS -DCUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+list(APPEND VLLM_FA_GPU_FLAGS -g)
+#list(APPEND VLLM_FA_GPU_FLAGS -G)
+list(APPEND VLLM_FA_GPU_FLAGS -lineinfo)
 
 # Replace instead of appending, nvcc doesn't like duplicate -O flags.
 string(REPLACE "-O2" "-O3" CMAKE_CUDA_FLAGS_RELWITHDEBINFO "${CMAKE_CUDA_FLAGS_RELWITHDEBINFO}")

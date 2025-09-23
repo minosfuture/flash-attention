@@ -840,9 +840,9 @@ struct CollectiveMainloopFwdSm90 {
                 paged_kv_manager.template load_page_table_TMA<true /*First_iter*/>(n_block);
             }
             if constexpr (Transpose_V) { load_V(n_block, smem_pipe_write, cute::true_type{} /*Seqlenk_mask*/); }
-            // if (thread_idx == 0) { printf("Producer: main load, before load_K, index = %d\n", smem_pipe_write.index());}
+            //if (thread_idx == 0) { printf("Producer: main load, before load_K, index = %d\n", smem_pipe_write.index());}
             load_K(n_block, smem_pipe_write, cute::true_type{} /*Seqlenk_mask*/);
-            // if (thread_idx == 0) { printf("Producer: main load, after load K, index = %d\n", smem_pipe_write.index());}
+            //if (thread_idx == 0) { printf("Producer: main load, after load K, index = %d\n", smem_pipe_write.index());}
         }
 
         if constexpr (Use_TMA_Q) {
@@ -884,9 +884,9 @@ struct CollectiveMainloopFwdSm90 {
         // Wait for the MMA WGs to signal that smem_v are ready and V can be copied from gmem
         // Need ClusterBarrier, not just NamedBarrier. Otherwise we might have CTA 0 finishing the
         // TMA store on O first, call TMA multicast load on V, before CTA 1 can finishing TMA store on O.
-        // if (thread_idx == 0) { printf("Producer: main load, before barrier_O, work_idx = %d\n", work_idx);}
+        //if (thread_idx == 0) { printf("Producer: main load, before barrier_O, work_idx = %d\n", work_idx);}
         shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
-        // if (thread_idx == 0) { printf("Producer: main load, after barrier_O\n");}
+        //if (thread_idx == 0) { printf("Producer: main load, after barrier_O\n");}
 
         if constexpr (!Transpose_V && !IntraWGOverlap) {
             if (should_load_KV) { load_V(n_block, smem_pipe_write, cute::true_type{} /*Seqlenk_mask*/); }
@@ -1264,7 +1264,7 @@ struct CollectiveMainloopFwdSm90 {
                     flash::gemm</*zero_init=*/false, /*wg_wait=*/0>(tiled_mma_qv, tSrQv, tSrV(_, _, _, smem_pipe_read.index()), tSrS);
                 }
                 scoremod_premask_fn(tSrS);
-                mask_fn(tSrS, n_block);
+                //mask_fn(tSrS, n_block);
                 cute::copy(softmax.template max_get_scale</*Is_first=*/false, Check_inf>(tSrS), scores_scale);
                 if constexpr (LargeHeadDimV) { store_scales(scores_scale, smem_pipe_read_v.index()); }
                 softmax.template online_softmax</*Is_first=*/false, Check_inf>(tSrS);
@@ -1613,23 +1613,23 @@ struct CollectiveMainloopFwdSm90 {
         // have finished reading all smem_k and smem_v for the previous iteration.
         shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
         if (should_load_KV) { load_K_new(n_block, smem_pipe_write); }
-        // if (thread_idx == 0) { printf("Producer: Done loading K, n_block = %d, n_block_new_min = %d\n", n_block, n_block_new_min); }
+        //if (thread_idx == 0) { printf("Producer: Done loading K, n_block = %d, n_block_new_min = %d\n", n_block, n_block_new_min); }
         if (should_load_KV) { load_V_new(n_block, smem_pipe_write); }
-        // if (thread_idx == 0) { printf("Producer: Done loading V, n_block = %d, n_block_new_min = %d\n", n_block, n_block_new_min); }
+        //if (thread_idx == 0) { printf("Producer: Done loading V, n_block = %d, n_block_new_min = %d\n", n_block, n_block_new_min); }
         ++smem_pipe_write;
         --n_block;
-        // if (thread_idx == 0) { printf("Producer: before for loop\n"); }
+        //if (thread_idx == 0) { printf("Producer: before for loop\n"); }
         #pragma unroll 1
         for (; n_block >= n_block_new_min; --n_block) {
             if (should_load_KV) {
                 load_K_new(n_block, smem_pipe_write);
-                // if (thread_idx == 0) { printf("Producer: Done loading K, n_block = %d, n_block_new_min = %d\n", n_block, n_block_new_min); }
+                //if (thread_idx == 0) { printf("Producer: Done loading K, n_block = %d, n_block_new_min = %d\n", n_block, n_block_new_min); }
                 load_V_new(n_block, smem_pipe_write);
-                // if (thread_idx == 0) { printf("Producer: Done loading V, n_block = %d, n_block_new_min = %d\n", n_block, n_block_new_min); }
+                //if (thread_idx == 0) { printf("Producer: Done loading V, n_block = %d, n_block_new_min = %d\n", n_block, n_block_new_min); }
             }
             ++smem_pipe_write;
         }
-        // if (thread_idx == 0) { printf("Producer: after for loop\n"); }
+        //if (thread_idx == 0) { printf("Producer: after for loop\n"); }
         // At the end, all threads have the correct smem_pipe_write.
         return true;
     }
@@ -1757,7 +1757,11 @@ struct CollectiveMainloopFwdSm90 {
             // before calling.
             cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, static_cast<uint32_t>(FwdNamedBarriers::WarpSchedulerWG1) - 1 + flash::canonical_warp_group_idx_nosync() /*id*/);
             pipeline_k_new.consumer_release(smem_pipe_read);
-            // if (thread_idx == 0) { print_tensor(tKpK); printf("\n"); printf("seqlen_limit = %d\n", seqlen_k_new - n_block * kBlockN);}
+            if (thread_idx == 0) {
+                //print_tensor(tKpK);
+                //printf("\n");
+                //printf("seqlen_limit = %d\n", seqlen_k_new - n_block * kBlockN);
+            }
         };
 
         auto store_V = [&] (int const n_block, auto const& smem_pipe_read) {
@@ -1781,12 +1785,12 @@ struct CollectiveMainloopFwdSm90 {
         for (int n_block = n_block_new_max - 1; n_block >= n_block_new_min; --n_block) {
             if constexpr (PagedKVNonTMA) { paged_kv_manager.template load_page_table<true /*Seqlenk_mask*/>(n_block); }
             store_K(n_block, smem_pipe_read);
-            // if (thread_idx == 0) { printf("Done storing K, n_block = %d, n_block_new_min = %d\n", n_block, n_block_new_min); }
+            //if (thread_idx == 0) { printf("Done storing K, n_block = %d, n_block_new_min = %d\n", n_block, n_block_new_min); }
             store_V(n_block, smem_pipe_read);
-            // if (thread_idx == 0) { printf("Done storing V, n_block = %d, n_block_new_min = %d\n", n_block, n_block_new_min); }
+            //if (thread_idx == 0) { printf("Done storing V, n_block = %d, n_block_new_min = %d\n", n_block, n_block_new_min); }
             ++smem_pipe_read;
         }
-        // if (thread_idx == 0) { printf("After for loop\n"); }
+        //if (thread_idx == 0) { printf("After for loop\n"); }
 
         // Re-signaling the NamedBarrier that we "canceled out"
         if constexpr (UseSchedulerBarrier) {

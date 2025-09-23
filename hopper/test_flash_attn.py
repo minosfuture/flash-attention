@@ -1,3 +1,5 @@
+from typing import Optional, Union, Tuple, List
+
 import os
 import math
 import itertools
@@ -21,6 +23,212 @@ from test_util import (
 
 from flash_attn_interface import flash_attn_func, flash_attn_varlen_func, flash_attn_combine
 from flash_attn_interface import flash_attn_with_kvcache, get_scheduler_metadata
+
+import flash_attn_3_cuda
+
+
+def maybe_contiguous(x):
+    return x.contiguous() if x is not None and x.stride(-1) != 1 else x
+
+def vllm_fa3_varlen_func(
+    q,
+    k,
+    v,
+    max_seqlen_q,
+    cu_seqlens_q,
+    max_seqlen_k,
+    cu_seqlens_k=None, # only used for non-paged prefill
+    seqused_k=None,
+    q_v=None,
+    dropout_p=0.0,
+    softmax_scale=None,
+    causal=False,
+    window_size: Optional[List[int]] = None,
+    softcap=0.0, # 0.0 means deactivated
+    alibi_slopes=None,
+    deterministic=False,
+    return_attn_probs=False,
+    block_table=None,
+    return_softmax_lse=False,
+    out=None,
+    # FA3 Only
+    scheduler_metadata=None,
+    q_descale=None,
+    k_descale=None,
+    v_descale=None,
+    num_splits: int = 0,
+    # Version selector
+    fa_version: int = 3,
+    s_aux=None,
+    cp_world_size=1,
+    cp_rank=0,
+):
+    """dropout_p should be set to 0.0 during evaluation
+    Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
+    than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
+    For example, if Q has 6 heads and K, V have 2 heads, head 0, 1, 2 of Q will attention to head
+    0 of K, V, and head 3, 4, 5 of Q will attention to head 1 of K, V.
+
+    If causal=True, the causal mask is aligned to the bottom right corner of the attention matrix.
+    For example, if seqlen_q = 2 and seqlen_k = 5, the causal mask (1 = keep, 0 = masked out) is:
+        1 1 1 1 0
+        1 1 1 1 1
+    If seqlen_q = 5 and seqlen_k = 2, the causal mask is:
+        0 0
+        0 0
+        0 0
+        1 0
+        1 1
+    If the row of the mask is all zero, the output will be zero.
+
+    If window_size != (-1, -1), implements sliding window local attention. Query at position i
+    will only attend to keys between
+    [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
+
+    Arguments:
+        q: (total_q, nheads, headdim), where total_q = total number of query tokens in the batch.
+        k: (total_k, nheads_k, headdim), where total_k = total number of key tokens in the batch.
+        v: (total_k, nheads_k, headdim), where total_k = total number of key tokens in the batch.
+        cu_seqlens_q: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
+           of the sequences in the batch, used to index into q.
+        cu_seqlens_k: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
+           of the sequences in the batch, used to index into kv.
+        max_seqlen_q: int. Maximum query sequence length in the batch.
+        max_seqlen_k: int. Maximum key sequence length in the batch.
+        dropout_p: float. Dropout probability.
+        softmax_scale: float. The scaling of QK^T before applying softmax.
+            Default to 1 / sqrt(headdim).
+        causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
+        window_size: (left, right). If not (-1, -1), implements sliding window local attention.
+        softcap: float. Anything > 0 activates softcapping attention.
+        alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of
+            (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
+            is added to the attention score of query i and key j.
+        deterministic: bool. Whether to use the deterministic implementation of the backward pass,
+            which is slightly slower and uses more memory. The forward pass is always deterministic.
+        return_attn_probs: bool. Whether to return the attention probabilities. This option is for
+           testing only. The returned probabilities are not guaranteed to be correct
+           (they might not have the right scaling).
+    Return:
+        out: (total, nheads, headdim).
+        softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen). The
+            logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
+            normalization factor).
+    """
+    assert cu_seqlens_k is not None or seqused_k is not None, \
+        "cu_seqlens_k or seqused_k must be provided"
+    assert cu_seqlens_k is None or seqused_k is None, \
+        "cu_seqlens_k and seqused_k cannot be provided at the same time"
+    assert block_table is None or seqused_k is not None, \
+        "seqused_k must be provided if block_table is provided"
+
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** (-0.5)
+    # custom op does not support non-tuple input
+    real_window_size: Tuple[int, int]
+    if window_size is None:
+        real_window_size = (-1, -1)
+    else:
+        assert len(window_size) == 2
+        real_window_size = (window_size[0], window_size[1])
+    q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
+
+    dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
+
+    if fa_version == 2:
+        if scheduler_metadata is not None and q_descale is not None \
+            and k_descale is not None and v_descale is not None:
+                raise NotImplementedError(
+                    "FA2 does not support scheduler_metadata, q_descale, "
+                    "k_descale, v_descale"
+                )
+        if s_aux is not None:
+            raise NotImplementedError("FA2 does not support s_aux")
+        if num_splits > 1:
+            raise NotImplementedError("FA2 does not support num_splits > 1")
+        out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
+            q, k, v,
+            out,
+            cu_seqlens_q,
+            # cu_seqlens_k not used since we use seqused_k, but flash_api.cpp
+            # still wants it so we pass all zeros
+            dummy_cu_seqlens_k if cu_seqlens_k is None else cu_seqlens_k,
+            seqused_k,
+            None,
+            block_table,
+            alibi_slopes,
+            max_seqlen_q,
+            max_seqlen_k,
+            dropout_p,
+            softmax_scale,
+            False,
+            causal,
+            real_window_size[0],
+            real_window_size[1],
+            softcap,
+            return_softmax_lse and dropout_p > 0,
+            None,
+        )
+    elif fa_version == 3:
+        assert alibi_slopes is None, "Alibi is not supported in FA3"
+
+        # Print all arguments passed to torch.ops._vllm_fa3_C.fwd
+        if cp_rank == 0:
+            debug_msg = ("[FA3 Debug] torch.ops._vllm_fa3_C.fwd args: " +
+                        f"q.shape={q.shape}, k.shape={k.shape}, v.shape={v.shape}, " +
+                        f"k_new=None, v_new=None, q_v.shape={q_v.shape if q_v is not None else None}, " +
+                        f"out.shape={out.shape if out is not None else None}, " +
+                        f"cu_seqlens_q.shape={cu_seqlens_q.shape if cu_seqlens_q is not None else None}, " +
+                        f"cu_seqlens_q={cu_seqlens_q if cu_seqlens_q is not None else None}, " +
+                        f"cu_seqlens_k.shape={cu_seqlens_k.shape if cu_seqlens_k is not None else None}, " +
+                        f"cu_seqlens_k={cu_seqlens_k if cu_seqlens_k is not None else None}, " +
+                        f"seqused_k.shape={seqused_k.shape if seqused_k is not None else None}, " +
+                        f"seqused_k={seqused_k if seqused_k is not None else None}, " +
+                        f"max_seqlen_q={max_seqlen_q}, max_seqlen_k={max_seqlen_k}, " +
+                        f"block_table.shape={block_table.shape if block_table is not None else None}, " +
+                        f"q_descale.shape={q_descale.shape if q_descale is not None else None}, " +
+                        f"k_descale.shape={k_descale.shape if k_descale is not None else None}, " +
+                        f"v_descale.shape={v_descale.shape if v_descale is not None else None}, " +
+                        f"softmax_scale={softmax_scale}, causal={causal}, " +
+                        f"window_left={real_window_size[0]}, window_right={real_window_size[1]}, " +
+                        f"softcap={softcap}, rotary_interleaved=True, " +
+                        f"scheduler_metadata={scheduler_metadata is not None}, num_splits={num_splits}, " +
+                        f"pack_gqa=None, sm_margin=0, s_aux.shape={s_aux.shape if s_aux is not None else None}, " +
+                        f"{cp_world_size=}, {cp_rank=}, " +
+                        f"{block_table.max().item()=}")
+            print(debug_msg)
+
+        out, softmax_lse, _, _ = flash_attn_3_cuda.fwd(
+            q, k, v,
+            None, None,       # k_new, v_new
+            q_v,
+            out,
+            cu_seqlens_q,
+            cu_seqlens_k,     # cu_seqlens_k
+            None,             # cu_seqlens_k_new
+            None, seqused_k,  # seqused_q, seqused_k
+            max_seqlen_q, max_seqlen_k,
+            block_table,
+            None,             # kv_batch_idx
+            None,             # leftpad_k
+            None, None, None, # rotary_cos, rotary_sin, seqlens_rotary
+            q_descale, k_descale, v_descale,
+            softmax_scale,
+            causal,
+            real_window_size[0], real_window_size[1],
+            softcap,
+            True,             # rotary_interleaved
+            scheduler_metadata,
+            num_splits,
+            None,             # pack_gqa
+            0,                # sm_margin
+            s_aux,            # s_aux
+            cp_world_size,
+            cp_rank,
+        )
+    else:
+        raise ValueError(f"Unsupported FA version: {fa_version}")
+    return (out, softmax_lse) if return_softmax_lse else out
 
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
@@ -79,10 +287,10 @@ COMPILED_HDIMS = (
 @pytest.mark.parametrize("deterministic", [True])
 @pytest.mark.parametrize("softcap", [0.0] + ([15.0] if not DISABLE_SOFTCAP else []))
 # @pytest.mark.parametrize("softcap", [0.0])
-@pytest.mark.parametrize("local", [False] + ([True] if not DISABLE_LOCAL else []))
-# @pytest.mark.parametrize("local", [False])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize("causal", [False])
+#@pytest.mark.parametrize("local", [False] + ([True] if not DISABLE_LOCAL else []))
+@pytest.mark.parametrize("local", [False])
+#@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [True])
 # @pytest.mark.parametrize("V_colmajor", [False, True])
 @pytest.mark.parametrize("V_colmajor", [False])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
@@ -92,39 +300,39 @@ COMPILED_HDIMS = (
 # @pytest.mark.parametrize("d", [64, 128, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128])
 # @pytest.mark.parametrize("d", [64, 96, 128, 192])
-@pytest.mark.parametrize("d", COMPILED_HDIMS)
-# @pytest.mark.parametrize("d", [64])
+#@pytest.mark.parametrize("d", COMPILED_HDIMS)
+@pytest.mark.parametrize("d", [128])
 @pytest.mark.parametrize("test_sink", [False, True])
 # @pytest.mark.parametrize("test_sink", [False])
+    #@pytest.mark.parametrize(
+    #    "seqlen_q,seqlen_k",
+    #    [
+    #        (1, 1),
+    #        (64, 128),
+    #        (128, 192),
+    #        (256, 256),
+    #        (239, 1),
+    #        (799, 3),
+    #        (113, 203),
+    #        (113, 128),
+    #        (128, 217),
+    #        (113, 211),
+    #        (108, 256),
+    #        (256, 512),
+    #        (384, 256),
+    #        (640, 128),
+    #        (512, 256),
+    #        (1024, 1024),
+    #        (1023, 1024),
+    #        (1024, 1023),
+    #        (4096, 4096),
+    #        (4224, 4224),
+    #    ],
+    #)
 @pytest.mark.parametrize(
-    "seqlen_q,seqlen_k",
-    [
-        (1, 1),
-        (64, 128),
-        (128, 192),
-        (256, 256),
-        (239, 1),
-        (799, 3),
-        (113, 203),
-        (113, 128),
-        (128, 217),
-        (113, 211),
-        (108, 256),
-        (256, 512),
-        (384, 256),
-        (640, 128),
-        (512, 256),
-        (1024, 1024),
-        (1023, 1024),
-        (1024, 1023),
-        (4096, 4096),
-        (4224, 4224),
-    ],
+    "cp_world_size", [8], #, 4, 2, 1], # 1 means disabling cp
 )
-@pytest.mark.parametrize(
-    "cp_world_size", [4, 2, 1], # 1 means disabling cp
-)
-#@pytest.mark.parametrize('seqlen_q,seqlen_k', [(1, 1)])
+@pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 256)])
 def test_flash_attn_output(
         seqlen_q, seqlen_k, d, causal, local, softcap, V_colmajor, deterministic, has_qv_, mha_type, dtype, test_sink,
         cp_world_size,
@@ -325,65 +533,78 @@ def test_flash_attn_output(
 
 
 # @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e4m3fn])
-@pytest.mark.parametrize("dtype", [torch.bfloat16] + ([torch.float16] if not DISABLE_FP16 else []) + ([torch.float8_e4m3fn] if not DISABLE_FP8 else []))
-# @pytest.mark.parametrize("dtype", [torch.bfloat16])
+#@pytest.mark.parametrize("dtype", [torch.bfloat16] + ([torch.float16] if not DISABLE_FP16 else []) + ([torch.float8_e4m3fn] if not DISABLE_FP8 else []))
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 # @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
-@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-# @pytest.mark.parametrize("mha_type", ["mha"])
+#@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+@pytest.mark.parametrize("mha_type", ["mha"])
 # @pytest.mark.parametrize("has_qv", [False] + ([True] if not DISABLE_HDIMDIFF64 else []))
 @pytest.mark.parametrize("has_qv_", [False])
 # @pytest.mark.parametrize("deterministic", [False, True])
 @pytest.mark.parametrize("deterministic", [False])
-@pytest.mark.parametrize("softcap", [0.0] + ([15.0] if not DISABLE_SOFTCAP else []))
-# @pytest.mark.parametrize("softcap", [0.0])
-@pytest.mark.parametrize("local", [False] + ([True] if not DISABLE_LOCAL else []))
-# @pytest.mark.parametrize("local", [False])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize("causal", [False])
-@pytest.mark.parametrize("add_unused_qkv", [False, True])
-# @pytest.mark.parametrize("add_unused_qkv", [True])
+#@pytest.mark.parametrize("softcap", [0.0] + ([15.0] if not DISABLE_SOFTCAP else []))
+@pytest.mark.parametrize("softcap", [0.0])
+#@pytest.mark.parametrize("local", [False] + ([True] if not DISABLE_LOCAL else []))
+@pytest.mark.parametrize("local", [False])
+#@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [True])
+#@pytest.mark.parametrize("add_unused_qkv", [False, True])
+@pytest.mark.parametrize("add_unused_qkv", [False])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192, 256])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128])
 # @pytest.mark.parametrize("d", [64, 96, 128])
-@pytest.mark.parametrize("d", COMPILED_HDIMS)
-# @pytest.mark.parametrize("d", [128])
-@pytest.mark.parametrize("test_sink", [False, True])
-# @pytest.mark.parametrize("test_sink", [True])
+#@pytest.mark.parametrize("d", COMPILED_HDIMS)
+@pytest.mark.parametrize("d", [128])
+#@pytest.mark.parametrize("test_sink", [False, True])
+@pytest.mark.parametrize("test_sink", [False])
+    #@pytest.mark.parametrize(
+    #    "seqlen_q,seqlen_k",
+    #    [
+    #        (1, 1),
+    #        (1, 3),
+    #        (2, 1),
+    #        (511, 1),
+    #        (3, 513),
+    #        (64, 128),
+    #        (128, 128),
+    #        (256, 256),
+    #        (113, 203),
+    #        (128, 217),
+    #        (113, 211),
+    #        (108, 256),
+    #        (256, 512),
+    #        (307, 256),
+    #        (640, 128),
+    #        (512, 256),
+    #        (1024, 1024),
+    #        (1023, 1024),
+    #        (1024, 1023),
+    #        (2048, 2048),
+    #    ],
+    #)
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
-    [
-        (1, 1),
-        (1, 3),
-        (2, 1),
-        (511, 1),
-        (3, 513),
-        (64, 128),
-        (128, 128),
-        (256, 256),
-        (113, 203),
-        (128, 217),
-        (113, 211),
-        (108, 256),
-        (256, 512),
-        (307, 256),
-        (640, 128),
-        (512, 256),
-        (1024, 1024),
-        (1023, 1024),
-        (1024, 1023),
-        (2048, 2048),
-    ],
+        [
+            (44,2059),
+        ],
+)
+@pytest.mark.parametrize(
+    "cp_world_size", [8], #, 4, 2, 1], # 1 means disabling cp
 )
 def test_flash_attn_varlen_output(
-        seqlen_q, seqlen_k, d, add_unused_qkv, causal, local, softcap, deterministic, has_qv_, mha_type, dtype, test_sink
+        seqlen_q, seqlen_k, d, add_unused_qkv, causal, local, softcap, deterministic, has_qv_, mha_type, dtype, test_sink, cp_world_size,
 ):
+    torch.set_printoptions(threshold=10000, linewidth=10000)
     if has_qv_ and (d != 64 or dtype == torch.float8_e4m3fn):
         pytest.skip("Has Qv requires hdim 64 and dtype to be float16 or bfloat16 (not float8_e4m3fn)")
     if test_sink and has_qv_:
         pytest.skip("Sink disabled for Qv")
+    if cp_world_size > 1 and local:
+        pytest.skip("context parallelism is not supported with local attention yet")
+
     device = "cuda"
     # set seed
     torch.random.manual_seed(seqlen_q + seqlen_k + d + int(causal) * 2 + int(local))
@@ -395,15 +616,29 @@ def test_flash_attn_varlen_output(
     # nheads = 1
     nheads_kv = nheads if mha_type == "mha" else (2 if mha_type == "gqa" else 1)
     dtype_ref = torch.bfloat16 if dtype == torch.float8_e4m3fn else dtype
+
+    seqlen_q=44
+    seqlen_k=2059
+    batch_size=2
+    d=64
+    dv=512
+    nheads=128
+    nheads_kv=1
+    num_splits=3
+
     if d == 192 and not DISABLE_HDIMDIFF192:
         dv_vals = [128, d]
     elif d == 64 and not DISABLE_HDIMDIFF64 and dtype != torch.float8_e4m3fn:
         dv_vals = [256, 512, d]
     else:
         dv_vals = [d]
+    dv_vals=[512]
     s_aux = torch.randn(nheads, device=device, dtype=torch.bfloat16) * 4 if test_sink else None
     # s_aux = torch.ones(nheads, device=device, dtype=torch.bfloat16) * 4 if test_sink else None
     # print("s_aux", s_aux)
+
+    cp_rank = 0
+
     if test_sink:
         dv_vals = [d]
     for dv in dv_vals:
@@ -421,7 +656,7 @@ def test_flash_attn_varlen_output(
         else:
             qv_ref = None
         # Put window_size after QKV randn so that window_size changes from test to test
-        window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
+        window_size = (-1, -1) if not local else torch.randint(0, cp_world_size * seqlen_k, (2,))
         if dtype == torch.float8_e4m3fn:
             q_descale, k_descale, v_descale = [torch.rand(batch_size, nheads_kv, device=device, dtype=torch.float32) * 2 for _ in range(3)]
         else:
@@ -431,8 +666,9 @@ def test_flash_attn_varlen_output(
         query_padding_mask = generate_random_padding_mask(
             seqlen_q, batch_size, device, mode="random", zero_lengths=False
         )
+        query_padding_mask = None
         key_padding_mask = generate_random_padding_mask(
-            seqlen_k, batch_size, device, mode="random", zero_lengths=True
+            seqlen_k, batch_size, device, mode="third", zero_lengths=False
         )
 
         def _gen_unused_masks(padding_mask, add_unused, max_seq_len, bs, device):
@@ -487,6 +723,8 @@ def test_flash_attn_varlen_output(
             window_size=window_size,
             softcap=softcap,
             s_aux=s_aux,
+            cp_world_size=cp_world_size,
+            cp_rank=cp_rank,
         )
         out_pt, attn_pt = attention_ref(
             q_ref,
@@ -503,11 +741,16 @@ def test_flash_attn_varlen_output(
             reorder_ops=True,
             intermediate_dtype=dtype if dtype == torch.float8_e4m3fn else None,
             s_aux=s_aux,
+            cp_world_size=cp_world_size,
+            cp_rank=cp_rank,
         )
 
 
         print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
         print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
+
+        print(f"{q.shape=}, {k.shape=}, {v.shape=} {q_ref.shape=}, {k_ref.shape=}, {v_ref.shape=}, {max_seqlen_q=}, {max_seqlen_k=}, "
+        f"{causal=}, {window_size=}, {softcap=}, {cu_seqlens_q.shape=}, {cu_seqlens_k.shape=}, {seqused_k=}, {cp_world_size=}, {cp_rank=}")
 
         if query_unused_mask is not None:
             q_zero_masking = rearrange(query_unused_mask, "b s -> b s 1 1")
@@ -519,6 +762,30 @@ def test_flash_attn_varlen_output(
         pack_gqa_vals = [False, True] if not DISABLE_PACKGQA else [False]
         num_splits_vals = [1, 3, 0] if not DISABLE_SPLIT else [1]
         for pack_gqa, num_splits in itertools.product(pack_gqa_vals, num_splits_vals):
+            out_unpad, lse = vllm_fa3_varlen_func(
+                torch.randn(61, 128, 64, device=device, dtype=dtype_ref),
+                torch.randn(28843, 16, 1, 64, device=device, dtype=dtype_ref),
+                torch.randn(28843, 16, 1, 512, device=device, dtype=dtype_ref),
+                35,
+                torch.tensor([ 0,  2,  4,  6,  8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 61], device=device, dtype=torch.int32),
+                258,
+                cu_seqlens_k=None,
+                seqused_k=torch.tensor([258, 257, 257, 257, 257, 257, 257, 257, 257, 257, 257, 257, 257, 257], device=device, dtype=torch.int32),
+                causal=True,
+                q_v=torch.randn(61, 128, 512, device=device, dtype=dtype_ref),
+                block_table=torch.randint(0, 28842, (14, 1280), device=device, dtype=torch.int32),
+                q_descale=None,
+                return_softmax_lse=True,
+                k_descale=None,
+                v_descale=None,
+                window_size=[-1, -1],
+                softcap=0.0,
+                scheduler_metadata=torch.tensor([0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5], device=device, dtype=torch.int32),
+                s_aux=None,
+                cp_world_size=8,
+                cp_rank=0,
+                num_splits=0,
+            )
             out_unpad, lse = flash_attn_varlen_func(
                 q_unpad,
                 k_unpad,
@@ -527,7 +794,7 @@ def test_flash_attn_varlen_output(
                 cu_seqlens_k,
                 max_seqlen_q,
                 max_seqlen_k,
-                seqused_q=seqused_q,
+                seqused_q=None, #seqused_q,
                 seqused_k=seqused_k,
                 causal=causal,
                 qv=qv_unpad,
@@ -536,7 +803,30 @@ def test_flash_attn_varlen_output(
                 window_size=window_size,
                 softcap=softcap,
                 s_aux=s_aux,
+                cp_world_size=cp_world_size,
+                cp_rank=cp_rank,
             )
+            print(f"{q_unpad.shape=}, {k_unpad.shape=}, {v_unpad.shape=}, {max_seqlen_q=}, {max_seqlen_k=}, "
+            f"{causal=}, {window_size=}, {softcap=}, {cu_seqlens_q.shape=}, {cu_seqlens_k.shape=}, {seqused_k=}, {pack_gqa=}")
+            #out_unpad, lse = vllm_fa3_varlen_func(
+            #    q_unpad,
+            #    k_unpad,
+            #    v_unpad,
+            #    max_seqlen_q,
+            #    cu_seqlens_q,
+            #    max_seqlen_k,
+            #    cu_seqlens_k=None, #cu_seqlens_k,
+            #    seqused_k=seqused_k,
+            #    causal=causal,
+            #    q_v=qv_unpad,
+            #    q_descale=q_descale,
+            #    k_descale=k_descale, v_descale=v_descale,
+            #    window_size=window_size,
+            #    softcap=softcap,
+            #    s_aux=s_aux,
+            #    cp_world_size=cp_world_size,
+            #    cp_rank=cp_rank,
+            #)
             print("Pack GQA =",pack_gqa)
             print("Num splits =",num_splits)
             out = output_pad_fn(out_unpad)

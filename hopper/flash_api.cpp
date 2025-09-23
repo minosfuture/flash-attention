@@ -389,6 +389,7 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream) {
 }
 
 void run_mha_fwd_combine(Flash_fwd_params &params, cudaStream_t stream, bool enable_pdl=false) {
+    printf("start %s\n", __FUNCTION__);
     #ifndef FLASHATTENTION_DISABLE_SPLIT
     // If hdim is 96 or 192, it's faster to round them to 128 or 256 respectively
     // so that kBlockM is smaller and we have more parallelism.
@@ -874,8 +875,8 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         }
     } else {
         out = !is_varlen_q
-            ? torch::empty({batch_size, seqlen_q, num_heads, head_size_v}, opts.dtype(out_type))
-            : torch::empty({total_q, num_heads, head_size_v}, opts.dtype(out_type));
+            ? torch::ones({batch_size, seqlen_q, num_heads, head_size_v}, opts.dtype(out_type))
+            : torch::ones({total_q, num_heads, head_size_v}, opts.dtype(out_type));
     }
 
     auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
@@ -1645,6 +1646,7 @@ mha_combine(const at::Tensor &out_partial,         // num_splits x batch_size x 
 
     if (seqlen > 0 && batch_size > 0) {
         auto stream = at::cuda::getCurrentCUDAStream().stream();
+        printf("mha_combine: run_mha_fwd_combine with seqlen=%d, batch_size=%d\n", seqlen, batch_size);
         run_mha_fwd_combine(params, stream, false /*enable_pdl*/);
     }
 

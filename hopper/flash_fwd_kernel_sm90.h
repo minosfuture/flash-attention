@@ -355,9 +355,9 @@ public:
                         params.mainloop, pipeline_k_new, pipeline_v_new,
                         smem_pipe_write_new, shared_storage, seqlen_info, block_coord, work_idx);
                     if (tile_new_valid) {
-                        // if (threadIdx.x == 0) { printf("Producer: Before sync\n"); }
+                        //if (threadIdx.x == 0) { printf("Producer: Before sync\n"); }
                         cutlass::arch::NamedBarrier::sync(NumMmaThreads + NumProducerThreads, static_cast<uint32_t>(FwdNamedBarriers::AppendKV) /*id*/);
-                        // if (threadIdx.x == 0) { printf("Producer: After sync\n"); }
+                        //if (threadIdx.x == 0) { printf("Producer: After sync\n"); }
                     }
                 }
                 auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() {
@@ -404,7 +404,7 @@ public:
                         params.mainloop, pipeline_k_new, pipeline_v_new, smem_pipe_read_new,
                         threadIdx.x - MmaThreadOffset, shared_storage, seqlen_info, block_coord);
                     if (tile_new_valid) {
-                        // if (threadIdx.x == 128) { printf("Consumer: Before sync\n"); }
+                        //if (threadIdx.x == 128) { printf("Consumer: Before sync\n"); }
                         // We need this sync so that the gmem write from the consumers is visible to the producer
                         // that might do TMA read after that.
                         asm volatile ("fence.proxy.async.global;");
@@ -412,7 +412,7 @@ public:
                         // arrive is enough, we don't need sync. The producer will sync, which means
                         // after that sync we're guaranteed that the AppendKV pipeline have finished
                         // loading and consumer smem_k and smem_v.
-                        // if (threadIdx.x == 128) { printf("Consumer: After sync\n"); }
+                        //if (threadIdx.x == 128) { printf("Consumer: After sync\n"); }
                     }
                 }
                 // If there's tanh softcap, the scaling will be done before tanh.
@@ -451,7 +451,7 @@ public:
                     }
                 }
                 if (tile_valid) {
-                    // if (threadIdx.x == 128) { printf("Before epilogue, bid.x = %d, bid.y = %d, bid.z = %d, m_block = %d, bidb = %d, split_idx = %d\n", blockIdx.x, blockIdx.y, blockIdx.z, m_block, bidb, split_idx); }
+                    if (threadIdx.x == 128) { printf("Before epilogue, bid.x = %d, bid.y = %d, bid.z = %d, m_block = %d, bidb = %d, split_idx = %d\n", blockIdx.x, blockIdx.y, blockIdx.z, get<0>(block_coord), bidb, get<3>(block_coord)); }
                     epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv,
                                    threadIdx.x - MmaThreadOffset, block_coord);
                 } else {

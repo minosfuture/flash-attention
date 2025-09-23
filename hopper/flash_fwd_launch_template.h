@@ -181,6 +181,8 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     // int smem_size_v = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_v));
     // printf("smem_size = %d, q = %d, k = %d, v = %d\n", smem_size, smem_size_q, smem_size_k, smem_size_v);
     // Get the ptr to kernel function.
+    cudaStreamSynchronize(stream);
+    CHECK_CUDA_KERNEL_LAUNCH();
     if constexpr (size(ClusterShape{}) > 1) {
         void const* kernel = (void const*) cutlass::device_kernel<AttnKernel>;
         if (smem_size >= 48 * 1024) {
@@ -197,6 +199,14 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         // kernel<<<grid_dims, block_dims, smem_size, stream>>>(kernel_params);
         cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params,
                                            Arch >= 90 && Varlen && params.num_splits_dynamic_ptr && !params.skip_scheduler_metadata_computation /*launch_with_pdl*/);
+    }
+    cudaStreamSynchronize(stream);
+    auto e = cudaGetLastError();
+    if (e != cudaSuccess) {
+      print("cp_rank:%d: seqlen_q=%d, seqlen_k=%d, h=%d, h_k=%d, d=%d, dv=%d, num_splits=%d, "
+            "b=%d\n", params.cp_rank, params.seqlen_q, params.seqlen_k, params.h, params.h_k,
+            params.d, params.dv, params.num_splits, params.b);
+      CHECK_CUDA(e);
     }
     CHECK_CUDA_KERNEL_LAUNCH();
 }
