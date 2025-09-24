@@ -451,7 +451,9 @@ public:
                     }
                 }
                 if (tile_valid) {
-                    if (threadIdx.x == 128) { printf("Before epilogue, bid.x = %d, bid.y = %d, bid.z = %d, m_block = %d, bidb = %d, split_idx = %d\n", blockIdx.x, blockIdx.y, blockIdx.z, get<0>(block_coord), bidb, get<3>(block_coord)); }
+                    //if (params.mainloop.cp_world_size > 1 && params.mainloop.cp_rank == 0 && threadIdx.x == 128) {
+                    //    printf("Before epilogue, bid.x = %d, bid.y = %d, bid.z = %d, m_block = %d, bidb = %d, split_idx = %d\n", blockIdx.x, blockIdx.y, blockIdx.z, get<0>(block_coord), bidb, get<3>(block_coord));
+                    //}
                     epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv,
                                    threadIdx.x - MmaThreadOffset, block_coord);
                 } else {

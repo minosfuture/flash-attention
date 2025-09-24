@@ -67,7 +67,7 @@ ENABLE_VCOLMAJOR = os.getenv("FLASH_ATTENTION_ENABLE_VCOLMAJOR", "FALSE") == "TR
 DISABLE_HDIMDIFF64 = os.getenv("FLASH_ATTENTION_DISABLE_HDIMDIFF64", "FALSE") == "TRUE"
 DISABLE_HDIMDIFF192 = os.getenv("FLASH_ATTENTION_DISABLE_HDIMDIFF192", "FALSE") == "TRUE"
 
-# DISABLE_BACKWARD = True
+DISABLE_BACKWARD = True
 # DISABLE_SPLIT = True
 # DISABLE_PAGEDKV = True
 # DISABLE_APPENDKV = True
@@ -83,7 +83,7 @@ DISABLE_HDIMDIFF192 = os.getenv("FLASH_ATTENTION_DISABLE_HDIMDIFF192", "FALSE") 
 # DISABLE_HDIM128 = True
 # DISABLE_HDIM192 = True
 # DISABLE_HDIM256 = True
-# DISABLE_SM8x = True
+DISABLE_SM8x = True
 
 # DISABLE_HDIMDIFF64 = True
 # DISABLE_HDIMDIFF192 = True
@@ -575,7 +575,6 @@ if not SKIP_CUDA_BUILD:
         # f"--split-compile={os.getenv('NVCC_THREADS', '4')}",  # split-compile is faster
         "-lineinfo",  # TODO: disable this for release to reduce binary size
         "-g",
-        "-G",
         "-DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED",  # Necessary for the WGMMA shapes that we use
         "-DCUTLASS_ENABLE_GDC_FOR_SM90",  # For PDL
         "-DCUTLASS_DEBUG_TRACE_LEVEL=0",  # Can toggle for debugging

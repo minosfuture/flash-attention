@@ -389,7 +389,6 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream) {
 }
 
 void run_mha_fwd_combine(Flash_fwd_params &params, cudaStream_t stream, bool enable_pdl=false) {
-    printf("start %s\n", __FUNCTION__);
     #ifndef FLASHATTENTION_DISABLE_SPLIT
     // If hdim is 96 or 192, it's faster to round them to 128 or 256 respectively
     // so that kBlockM is smaller and we have more parallelism.
