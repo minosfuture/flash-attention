@@ -90,6 +90,8 @@ def get_scheduler_metadata(
     num_splits=0,    # Can be tuned for speed
     pack_gqa=None,   # Can be tuned for speed
     sm_margin=0,     # Can be tuned if some SMs are used for communication
+    cp_world_size=1,
+    cp_rank=0,
 ):
     cache_seqlens = maybe_contiguous(cache_seqlens)
     if headdim_v is None:
@@ -111,6 +113,8 @@ def get_scheduler_metadata(
         num_splits,
         pack_gqa,
         sm_margin,
+        cp_world_size,
+        cp_rank
     )
 
     return scheduler_metadata

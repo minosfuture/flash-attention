@@ -82,7 +82,9 @@ mha_fwd_get_scheduler_metadata(
         bool has_softcap,
         int num_splits,
         std::optional<bool> pack_gqa_,
-        int const sm_margin
+        int const sm_margin,
+        int const cp_world_size,
+        int const cp_rank
 );
 
 /**
@@ -150,7 +152,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
             "    bool     has_softcap,"
             "    int      num_splits,"
             "    bool?    pack_gqa,"
-            "    int      sm_margin) -> Tensor");
+            "    int      sm_margin,"
+            "    int      cp_world_size,"
+            "    int      cp_rank"
+            ") -> Tensor");
    ops.impl("get_scheduler_metadata", torch::kCUDA, 
         make_pytorch_shim(&mha_fwd_get_scheduler_metadata));
 }

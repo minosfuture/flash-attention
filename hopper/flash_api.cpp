@@ -559,7 +559,9 @@ mha_fwd_get_scheduler_metadata(
         bool has_softcap,
         int num_splits,
         std::optional<bool> pack_gqa_,
-        int const sm_margin
+        int const sm_margin,
+        int const cp_world_size,
+        int const cp_rank
         ) {
 
     TORCH_CHECK(qkv_dtype == at::ScalarType::Half || qkv_dtype == at::ScalarType::BFloat16 || qkv_dtype == at::ScalarType::Float8_e4m3fn,
@@ -624,6 +626,8 @@ mha_fwd_get_scheduler_metadata(
     // Always enable PackGQA for Split
     params.pack_gqa |= params.num_splits > 1;
     // printf("Num splits (metadata) = %d.\n", params.num_splits);
+    params.cp_world_size = cp_world_size;
+    params.cp_rank = cp_rank;
 
     bool is_varlen = true;
 
